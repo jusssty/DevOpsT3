@@ -58,7 +58,7 @@ jobs:
     name: Deploy to staging
     needs: [lint]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, infra]
+    runs-on: [self-hosted, macOS, ARM64, infra]
     environment: staging
     concurrency:
       group: infra-deploy
@@ -114,7 +114,7 @@ jobs:
     name: Deploy to production
     needs: [deploy-staging]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, infra]
+    runs-on: [self-hosted, macOS, ARM64, infra]
     environment: production
     concurrency:
       group: infra-deploy
