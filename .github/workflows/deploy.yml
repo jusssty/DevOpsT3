@@ -1,80 +1,145 @@
-name: Deploy to pre-production
+name: Deploy to staging
 
 on:
   workflow_run:
     workflows: ["AuctionHub CI"]
-    types: [completed]
-    branches: [main]
+    types:
+      - completed
+    branches:
+      - main
+
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (e.g. sha-abc1234)'
+        description: "Image tag to deploy (e.g. sha-abc1234)"
         required: true
+        type: string
 
 permissions:
   contents: read
   packages: read
 
 concurrency:
-  group: deploy-preprod
+  group: deploy-staging
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Deploy to dockerchine-devop
+    name: Deploy to staging server
     runs-on: self-hosted
-    if: >
+
+    if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push')
-    environment: preprod
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'
+      )
+
+    environment: staging
+
     steps:
       - name: Resolve image tag
         id: tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$INPUT_TAG"
           else
-            echo "tag=sha-${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+            TAG="sha-${WORKFLOW_SHA}"
           fi
+
+          if [[ ! "$TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid image tag: $TAG"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve image name
+        id: image
+        shell: bash
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          OWNER="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${OWNER}/auctionhub" >> "$GITHUB_OUTPUT"
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: IMAGE_NAME,IMAGE_TAG
           script: |
-            set -euo pipefail
-            cd /home/deployer/auctionhub
+            set -eu
 
-            TAG="${{ steps.tag.outputs.tag }}"
-            IMAGE="ghcr.io/dimaan49/auctionhub:${TAG}"
+            cd /home/azvyagintsev/prog/polytech/DevOpsT3
+
+            IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 
             echo "Deploying image: ${IMAGE}"
 
+            if [ ! -f .env ]; then
+              echo "ERROR: .env file not found in $(pwd)"
+              exit 1
+            fi
+
+            touch .env
             sed -i '/^AUCTIONHUB_IMAGE=/d' .env
             sed -i '/^AUCTIONHUB_VERSION=/d' .env
-            echo "AUCTIONHUB_IMAGE=${IMAGE}" >> .env
-            echo "AUCTIONHUB_VERSION=${TAG}" >> .env
+            printf 'AUCTIONHUB_IMAGE=%s\n' "$IMAGE" >> .env
+            printf 'AUCTIONHUB_VERSION=%s\n' "$IMAGE_TAG" >> .env
 
             docker compose pull app
             docker compose up -d --no-build --force-recreate app
 
+            echo "Waiting for application health check..."
+
+            HEALTHY=0
             for i in $(seq 1 30); do
-              if curl -sf http://localhost:8080/health > /dev/null; then
+              if curl -fsS http://localhost:8081/health >/dev/null; then
+                HEALTHY=1
                 break
               fi
               sleep 2
             done
 
-            curl -sf http://localhost:8080/health
+            if [ "$HEALTHY" -ne 1 ]; then
+              echo "ERROR: Application health check failed"
+              docker compose ps
+              docker compose logs --tail=100 app
+              exit 1
+            fi
 
-            DEPLOYED_VERSION=$(curl -sf http://localhost:8080/version | jq -r .version)
-            echo "Deployed version: ${DEPLOYED_VERSION}"
+            curl -fsS http://localhost:8081/health
+            echo
 
-            if [ "${DEPLOYED_VERSION}" != "${TAG}" ]; then
-              echo "Version mismatch: expected ${TAG}, got ${DEPLOYED_VERSION}"
+            if curl -fsS http://localhost:8081/version >/tmp/auctionhub-version.json; then
+              DEPLOYED_VERSION="$(jq -r '.version // empty' /tmp/auctionhub-version.json)"
+              rm -f /tmp/auctionhub-version.json
+
+              if [ "$DEPLOYED_VERSION" != "$IMAGE_TAG" ]; then
+                echo "ERROR: Version mismatch"
+                echo "Expected: $IMAGE_TAG"
+                echo "Actual:   $DEPLOYED_VERSION"
+                exit 1
+              fi
+
+              echo "Deployed version: $DEPLOYED_VERSION"
+            else
+              echo "ERROR: Could not read application version"
               exit 1
             fi
 
