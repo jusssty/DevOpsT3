@@ -22,6 +22,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+//test for PS
+
 static void loadDotEnv(const QString& path) {
 
     QFile file(path);
