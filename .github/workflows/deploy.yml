@@ -85,7 +85,7 @@ jobs:
           script: |
             set -eu
 
-            cd /home/azvyagintsev/prog/polytech/DevOpsT3
+            cd /Users/macbookpro/prog/polytech/DevOpsT3
 
             IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 
