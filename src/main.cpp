@@ -22,7 +22,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-//test for PS
+// test for PS
 
 static void loadDotEnv(const QString& path) {
 
